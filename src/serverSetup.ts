@@ -7,8 +7,9 @@ export interface ServerInstallOptions {
     id: string;
     quality: string;
     commit: string;
-    version: string;
-    release?: string; // vscodium specific
+    version: string;      // upstream VS Code version (e.g. 1.105.1)
+    buildVersion?: string; // VSCodium build version (e.g. 1.105.17075)
+    release?: string;
     extensionIds: string[];
     envVariables: string[];
     useSocketPath: boolean;
@@ -35,7 +36,13 @@ export class ServerInstallError extends Error {
     }
 }
 
-const DEFAULT_DOWNLOAD_URL_TEMPLATE = 'https://github.com/VSCodium/vscodium/releases/download/${version}.${release}/vscodium-reh-${os}-${arch}-${version}.${release}.tar.gz';
+// Modified to point to your AIX server by default
+// const DEFAULT_DOWNLOAD_URL_TEMPLATE = 'https://github.ibm.com/tony-varghese/vscodium-aix-server/releases/download/v${version}/vscodium-reh-aix-ppc64-${version}.tar.gz';
+
+// Default AIX server download (tag == version, asset == vscodium-reh-aix-ppc64-${version}.tar.gz)
+const DEFAULT_DOWNLOAD_URL_TEMPLATE =
+    'https://github.com/tonykuttai/vscodium-aix-server/releases/download/${buildVersion}/vscodium-reh-aix-ppc64-${buildVersion}.tar.gz';
+
 
 export async function installCodeServer(conn: SSHConnection, serverDownloadUrlTemplate: string | undefined, extensionIds: string[], envVariables: string[], platform: string | undefined, useSocketPath: boolean, logger: Log): Promise<ServerInstallResult> {
     let shell = 'powershell';
@@ -70,9 +77,55 @@ export async function installCodeServer(conn: SSHConnection, serverDownloadUrlTe
     const scriptId = crypto.randomBytes(12).toString('hex');
 
     const vscodeServerConfig = await getVSCodeServerConfig();
+    let buildVersion = extractBuildVersionFromTemplate(
+        vscodeServerConfig.serverDownloadUrlTemplate,
+        vscodeServerConfig.version
+    );
+
+    // If platform is AIX, try to match client version
+    if (platform === 'aix' || !platform) {
+        logger.trace(`serverDownloadUrlTemplate: ${vscodeServerConfig.serverDownloadUrlTemplate}`);
+        logger.trace(`vscodeServerConfig.version: ${vscodeServerConfig.version}`);
+        
+        // Extract build version from the client's download URL template
+        const clientBuildVersion = extractBuildVersionFromTemplate(
+            vscodeServerConfig.serverDownloadUrlTemplate,
+            vscodeServerConfig.version
+        );
+        logger.trace(`Extracted clientBuildVersion: ${clientBuildVersion}`);
+
+        if (clientBuildVersion && clientBuildVersion !== vscodeServerConfig.version) {
+            // We successfully extracted a build version different from the base version
+            buildVersion = clientBuildVersion;
+            logger.trace(`Using client's VSCodium build version for AIX: ${buildVersion}`);
+        } else {
+            // Try to find a matching AIX server version based on client version
+            const baseVersion = vscodeServerConfig.version.split('+')[0]; // Extract "1.105.1" from "1.105.1+bob1.0.0"
+            logger.trace(`Attempting to find matching AIX version for base version: ${baseVersion}`);
+            
+            const matchingAIXVersion = await getMatchingAIXServerVersion(baseVersion);
+            if (matchingAIXVersion) {
+                logger.trace(`Using matching AIX server version for ${baseVersion}: ${matchingAIXVersion}`);
+                buildVersion = matchingAIXVersion;
+            } else {
+                logger.trace(`No matching AIX version found for ${baseVersion}, using fallback`);
+                // Last resort: try to use a known working version or client version
+                // For Bob IDE 1.105.1+bob1.0.0, we know 1.105.17075 exists
+                if (baseVersion === '1.105.1') {
+                    buildVersion = '1.105.17075';
+                    logger.trace(`Using hardcoded fallback version: ${buildVersion}`);
+                } else {
+                    buildVersion = vscodeServerConfig.version;
+                    logger.trace(`Using client version as fallback: ${buildVersion}`);
+                }
+            }
+        }
+    }
+
     const installOptions: ServerInstallOptions = {
         id: scriptId,
-        version: vscodeServerConfig.version,
+        version: vscodeServerConfig.version,          // 1.105.1
+        buildVersion,                                 // 1.105.17075 (parsed)
         commit: vscodeServerConfig.commit,
         quality: vscodeServerConfig.quality,
         release: vscodeServerConfig.release,
@@ -81,7 +134,10 @@ export async function installCodeServer(conn: SSHConnection, serverDownloadUrlTe
         useSocketPath,
         serverApplicationName: vscodeServerConfig.serverApplicationName,
         serverDataFolderName: vscodeServerConfig.serverDataFolderName,
-        serverDownloadUrlTemplate: serverDownloadUrlTemplate || vscodeServerConfig.serverDownloadUrlTemplate || DEFAULT_DOWNLOAD_URL_TEMPLATE,
+        serverDownloadUrlTemplate:
+            serverDownloadUrlTemplate ||
+            vscodeServerConfig.serverDownloadUrlTemplate ||
+            DEFAULT_DOWNLOAD_URL_TEMPLATE,
     };
 
     let commandOutput: { stdout: string; stderr: string };
@@ -198,17 +254,34 @@ function parseServerInstallOutput(str: string, scriptId: string): { [k: string]:
     return resultMap;
 }
 
-function generateBashInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, useSocketPath, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate }: ServerInstallOptions) {
+// Simplified AIX installation - uses pre-built server directly
+function generateBashInstallScript({
+    id,
+    quality,
+    version,
+    buildVersion,
+    commit,
+    release,
+    extensionIds,
+    envVariables,
+    useSocketPath,
+    serverApplicationName,
+    serverDataFolderName,
+    serverDownloadUrlTemplate
+}: ServerInstallOptions) {
     const extensions = extensionIds.map(id => '--install-extension ' + id).join(' ');
+    const effectiveBuildVersion = buildVersion ?? version;
+
     return `
 # Server installation script
 
 TMP_DIR="\${XDG_RUNTIME_DIR:-"/tmp"}"
 
 DISTRO_VERSION="${version}"
+DISTRO_BUILD_VERSION="${effectiveBuildVersion}"
 DISTRO_COMMIT="${commit}"
 DISTRO_QUALITY="${quality}"
-DISTRO_VSCODIUM_RELEASE="${release ?? ''}"
+DISTRO_VSCODIUM_RELEASE="${release || ''}"
 
 SERVER_APP_NAME="${serverApplicationName}"
 SERVER_INITIAL_EXTENSIONS="${extensions}"
@@ -259,6 +332,9 @@ case $KERNEL in
     DragonFly)
         PLATFORM="dragonfly"
         ;;
+    AIX)
+        PLATFORM="aix"
+        ;;
     *)
         echo "Error platform not supported: $KERNEL"
         print_install_results_and_exit 1
@@ -280,6 +356,9 @@ case $ARCH in
     ppc64le)
         SERVER_ARCH="ppc64le"
         ;;
+    ppc64|powerpc64)
+        SERVER_ARCH="ppc64"
+        ;;
     riscv64)
         SERVER_ARCH="riscv64"
         ;;
@@ -290,17 +369,42 @@ case $ARCH in
         SERVER_ARCH="s390x"
         ;;
     *)
-        echo "Error architecture not supported: $ARCH"
-        print_install_results_and_exit 1
+        # Handle AIX special case where uname -m returns machine ID
+        if [[ $PLATFORM == "aix" ]]; then
+            AIX_ARCH="$(uname -p 2>/dev/null)"
+            case $AIX_ARCH in
+                powerpc)
+                    SERVER_ARCH="ppc64"
+                    ARCH="ppc64"
+                    ;;
+                *)
+                    echo "Error AIX architecture not supported: $AIX_ARCH"
+                    print_install_results_and_exit 1
+                    ;;
+            esac
+        else
+            echo "Error architecture not supported: $ARCH"
+            print_install_results_and_exit 1
+        fi
         ;;
 esac
 
-# https://www.freedesktop.org/software/systemd/man/os-release.html
-OS_RELEASE_ID="$(grep -i '^ID=' /etc/os-release 2>/dev/null | sed 's/^ID=//gi' | sed 's/"//g')"
-if [[ -z $OS_RELEASE_ID ]]; then
-    OS_RELEASE_ID="$(grep -i '^ID=' /usr/lib/os-release 2>/dev/null | sed 's/^ID=//gi' | sed 's/"//g')"
+# Add freeware path for AIX
+if [[ $PLATFORM == "aix" ]]; then
+    export PATH="/opt/freeware/bin:$PATH"
+fi
+
+# Handle OS release detection
+if [[ $PLATFORM == "aix" ]]; then
+    OS_RELEASE_ID="aix"
+else
+    # Use AIX-compatible sed syntax (no -i flag, use case-insensitive grep)
+    OS_RELEASE_ID="$(grep -i '^ID=' /etc/os-release 2>/dev/null | sed 's/^ID=//I' | sed 's/"//g')"
     if [[ -z $OS_RELEASE_ID ]]; then
-        OS_RELEASE_ID="unknown"
+        OS_RELEASE_ID="$(grep -i '^ID=' /usr/lib/os-release 2>/dev/null | sed 's/^ID=//I' | sed 's/"//g')"
+        if [[ -z $OS_RELEASE_ID ]]; then
+            OS_RELEASE_ID="unknown"
+        fi
     fi
 fi
 
@@ -318,12 +422,28 @@ if [[ $OS_RELEASE_ID = alpine ]]; then
     PLATFORM=$OS_RELEASE_ID
 fi
 
-SERVER_DOWNLOAD_URL="$(echo "${serverDownloadUrlTemplate.replace(/\$\{/g, '\\${')}" | sed "s/\\\${quality}/$DISTRO_QUALITY/g" | sed "s/\\\${version}/$DISTRO_VERSION/g" | sed "s/\\\${commit}/$DISTRO_COMMIT/g" | sed "s/\\\${os}/$PLATFORM/g" | sed "s/\\\${arch}/$SERVER_ARCH/g" | sed "s/\\\${release}/$DISTRO_VSCODIUM_RELEASE/g")"
+# Build server download URL
+if [[ $PLATFORM == "aix" ]]; then
+    # For AIX, use the VSCodium build version (e.g. 1.105.17075), not the upstream VS Code version (1.105.1)
+    SERVER_DOWNLOAD_URL="https://github.com/tonykuttai/vscodium-aix-server/releases/download/$DISTRO_BUILD_VERSION/vscodium-reh-aix-ppc64-$DISTRO_BUILD_VERSION.tar.gz"
+
+    echo "Downloading VSCodium server for AIX from GitHub..."
+    echo "URL: $SERVER_DOWNLOAD_URL"
+else
+    # Original VSCodium/VSCODE URL for other platforms
+    SERVER_DOWNLOAD_URL="$(echo "${serverDownloadUrlTemplate.replace(/\$\{/g, '\\${')}" \
+        | sed "s/\\\${quality}/$DISTRO_QUALITY/g" \
+        | sed "s/\\\${version}/$DISTRO_VERSION/g" \
+        | sed "s/\\\${commit}/$DISTRO_COMMIT/g" \
+        | sed "s/\\\${os}/$PLATFORM/g" \
+        | sed "s/\\\${arch}/$SERVER_ARCH/g" \
+        | sed "s/\\\${release}/$DISTRO_VSCODIUM_RELEASE/g")"
+fi
 
 # Check if server script is already installed
 if [[ ! -f $SERVER_SCRIPT ]]; then
     case "$PLATFORM" in
-        darwin | linux | alpine )
+        darwin | linux | alpine | aix )
             ;;
         *)
             echo "Error '$PLATFORM' needs manual installation of remote extension host"
@@ -331,8 +451,12 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
             ;;
     esac
 
-    pushd $SERVER_DIR > /dev/null
+    pushd $SERVER_DIR > /dev/null || {
+        echo "Error: Failed to enter server directory $SERVER_DIR"
+        print_install_results_and_exit 1
+    }
 
+    # Standard download logic for all platforms including AIX
     if [[ ! -z $(which wget) ]]; then
         wget --tries=3 --timeout=10 --continue --no-verbose -O vscode-server.tar.gz $SERVER_DOWNLOAD_URL
     elif [[ ! -z $(which curl) ]]; then
@@ -347,10 +471,304 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
         print_install_results_and_exit 1
     fi
 
-    tar -xf vscode-server.tar.gz --strip-components 1
+    echo "Extracting server package..."
+    # AIX tar doesn't support -z flag, use gunzip first
+    if ! gunzip -c vscode-server.tar.gz | tar -xf - --strip-components 1; then
+        echo "Error while extracting server contents"
+        print_install_results_and_exit 1
+    fi
+
     if (( $? > 0 )); then
         echo "Error while extracting server contents"
         print_install_results_and_exit 1
+    fi
+
+    # Special handling for AIX server wrapper
+    if [[ $PLATFORM == "aix" ]]; then
+        # Ensure the AIX server wrapper is executable
+        if [[ -f "$SERVER_DIR/bin/codium-server" ]]; then
+            chmod +x "$SERVER_DIR/bin/codium-server"
+            echo "AIX server wrapper made executable"
+        fi
+        
+        # Ensure Node.js is available for AIX
+        echo "=== Setting up Node.js for AIX ==="
+        
+        NODE_BINARY=""
+        
+        # First, check if Node.js is already installed in home directory
+        if [[ -x "$HOME/.nodejs-v22.22.0/bin/node" ]]; then
+            NODE_BINARY="$HOME/.nodejs-v22.22.0/bin/node"
+            echo "Found Node.js in home directory: $NODE_BINARY"
+            $NODE_BINARY --version
+        else
+            # Try to find existing Node.js in system (skip wrapper scripts)
+            echo "Searching for existing Node.js installation..."
+            
+            # Check common paths
+            for node_path in /usr/bin/node /opt/freeware/bin/node /usr/local/bin/node; do
+                if [[ -x "$node_path" ]]; then
+                    # Verify it's not a wrapper script by checking if it references /opt/nodejs
+                    if ! grep -q "/opt/nodejs/bin/node" "$node_path" 2>/dev/null; then
+                        # Try to run it to verify it works
+                        if "$node_path" --version >/dev/null 2>&1; then
+                            NODE_BINARY="$node_path"
+                            echo "Found working Node.js at: $NODE_BINARY"
+                            $NODE_BINARY --version
+                            break
+                        fi
+                    fi
+                fi
+            done
+        fi
+        
+        # If no existing Node.js found, download and install
+        if [[ -z "$NODE_BINARY" ]]; then
+            echo "No existing Node.js found, downloading Node.js v22.22.0 for AIX..."
+            
+            NODE_INSTALL_DIR="$HOME/.nodejs-v22.22.0"
+            NODE_BINARY="$NODE_INSTALL_DIR/bin/node"
+            
+            NODE_VERSION="v22.22.0"
+            NODE_TARBALL="node-$NODE_VERSION-aix-ppc64.tar.gz"
+            NODE_URL="https://nodejs.org/dist/$NODE_VERSION/$NODE_TARBALL"
+            
+            cd "$HOME"
+            
+            if [[ ! -z $(which wget) ]]; then
+                wget --tries=3 --timeout=30 --no-verbose -O "$NODE_TARBALL" "$NODE_URL"
+            elif [[ ! -z $(which curl) ]]; then
+                curl --retry 3 --connect-timeout 30 --location --show-error --silent --output "$NODE_TARBALL" "$NODE_URL"
+            else
+                echo "Error: No download tool (wget/curl) available"
+                print_install_results_and_exit 1
+            fi
+            
+            if [[ -f "$NODE_TARBALL" ]]; then
+                echo "Extracting Node.js to $NODE_INSTALL_DIR..."
+                mkdir -p "$NODE_INSTALL_DIR"
+                # AIX tar doesn't support -z flag, use gunzip first
+                gunzip -c "$NODE_TARBALL" | tar -xf - -C "$NODE_INSTALL_DIR" --strip-components=1
+                rm -f "$NODE_TARBALL"
+                
+                if [[ -x "$NODE_BINARY" ]]; then
+                    echo "✓ Node.js installed successfully"
+                    $NODE_BINARY --version
+                else
+                    echo "Error: Failed to extract Node.js properly"
+                    print_install_results_and_exit 1
+                fi
+            else
+                echo "Error: Failed to download Node.js"
+                print_install_results_and_exit 1
+            fi
+            
+            cd "$SERVER_DIR"
+        fi
+        
+        # Try to create symlink at /opt/nodejs/bin/node (required by AIX server wrapper)
+        SYMLINK_CREATED=false
+        if mkdir -p /opt/nodejs/bin 2>/dev/null && ln -sf "$NODE_BINARY" /opt/nodejs/bin/node 2>/dev/null; then
+            # Verify the symlink is actually usable (not just created)
+            if /opt/nodejs/bin/node --version >/dev/null 2>&1; then
+                SYMLINK_CREATED=true
+                echo "✓ Created symlink: /opt/nodejs/bin/node -> $NODE_BINARY"
+            else
+                echo "⚠ Symlink created but not usable (permission issue)"
+            fi
+        fi
+        
+        # If symlink creation failed or not usable, patch the server wrapper
+        if [[ "$SYMLINK_CREATED" != "true" ]]; then
+            echo "⚠ Cannot use /opt/nodejs/bin/node (no permissions or not root)"
+            echo "⚠ Patching server wrapper to use $NODE_BINARY directly..."
+            
+            # Patch codium-server wrapper to use home directory Node.js
+            if [[ -f "$SERVER_DIR/bin/codium-server" ]]; then
+                cp "$SERVER_DIR/bin/codium-server" "$SERVER_DIR/bin/codium-server.backup"
+                
+                # Replace the NODE_BIN search logic with direct path
+                # Use a temp file to avoid variable expansion issues
+                TEMP_WRAPPER="$SERVER_DIR/bin/codium-server.new"
+                cat > "$TEMP_WRAPPER" << 'WRAPPER_EOF'
+#!/bin/bash
+
+# Patched to use Node.js from home directory
+NODE_BIN="NODE_BINARY_PLACEHOLDER"
+
+if [ ! -x "$NODE_BIN" ]; then
+    echo "ERROR: Node.js not found at $NODE_BIN" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVER_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Add node-pty native-libs to LIBPATH with absolute path
+export LIBPATH="\${SERVER_ROOT}/node_modules/node-pty/lib/native-libs:\${LIBPATH}"
+
+# Execute the server
+exec "$NODE_BIN" "$SERVER_ROOT/out/server-main.js" "$@"
+WRAPPER_EOF
+                # Replace placeholder with actual Node.js path
+                sed "s|NODE_BINARY_PLACEHOLDER|$NODE_BINARY|g" "$TEMP_WRAPPER" > "$SERVER_DIR/bin/codium-server"
+                rm -f "$TEMP_WRAPPER"
+                chmod +x "$SERVER_DIR/bin/codium-server"
+                echo "✓ Patched codium-server to use $NODE_BINARY"
+            fi
+            
+            # Also patch the node wrapper if it exists
+            if [[ -f "$SERVER_DIR/bin/node" ]]; then
+                cat > "$SERVER_DIR/bin/node" <<EOF
+#!/usr/bin/env sh
+exec "$NODE_BINARY" "\$@"
+EOF
+                chmod +x "$SERVER_DIR/bin/node"
+                echo "✓ Patched $SERVER_DIR/bin/node wrapper"
+            fi
+        fi
+        
+        # Update PATH
+        export PATH="$NODE_INSTALL_DIR/bin:$PATH"
+        echo "✓ Node.js setup complete"
+        
+        # Detect if this is Bob IDE by checking version string or server application name
+        IS_BOB_IDE=false
+        if [[ "$DISTRO_VERSION" == *"+bob"* ]] || [[ "$SERVER_APP_NAME" == *"bob"* ]]; then
+            IS_BOB_IDE=true
+            echo "=== Detected Bob IDE ==="
+        else
+            echo "=== Detected VSCodium/VS Code ==="
+        fi
+        
+        # Bob IDE specific operations
+        if [[ "$IS_BOB_IDE" == true ]]; then
+            echo "=== Applying Bob IDE Specific Configuration ==="
+            
+            # Patch product.json to match Bob IDE commit/version for client handshake
+            if [[ -f "$SERVER_DIR/product.json" ]]; then
+                echo "=== AIX VSCodium Server Version Update ==="
+                echo "Patching product.json with Bob IDE values..."
+                echo "Target Version: $DISTRO_VERSION"
+                echo "Target Commit: $DISTRO_COMMIT"
+                
+                # Backup original product.json
+                cp "$SERVER_DIR/product.json" "$SERVER_DIR/product.json.backup"
+                
+                # Use Python to safely update JSON (more reliable than sed for JSON)
+                python3 -c "
+import json
+import sys
+
+try:
+    with open('$SERVER_DIR/product.json', 'r') as f:
+        data = json.load(f)
+    
+    # Update top-level version and commit
+    data['version'] = '$DISTRO_VERSION'
+    data['commit'] = '$DISTRO_COMMIT'
+    
+    with open('$SERVER_DIR/product.json', 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    print('✓ product.json patched successfully using Python')
+except Exception as e:
+    print(f'Warning: Python patching failed: {e}')
+    print('Falling back to sed...')
+    sys.exit(1)
+" || {
+                    # Fallback to sed if Python fails
+                    echo "Using sed fallback for product.json patching..."
+                    sed '0,/"version"[[:space:]]*:[[:space:]]*"[^"]*"/{s/"version"[[:space:]]*:[[:space:]]*"[^"]*"/"version": "'$DISTRO_VERSION'"/;}' "$SERVER_DIR/product.json" > "$SERVER_DIR/product.json.tmp1"
+                    sed '0,/"commit"[[:space:]]*:[[:space:]]*"[^"]*"/{s/"commit"[[:space:]]*:[[:space:]]*"[^"]*"/"commit": "'$DISTRO_COMMIT'"/;}' "$SERVER_DIR/product.json.tmp1" > "$SERVER_DIR/product.json.tmp2"
+                    mv "$SERVER_DIR/product.json.tmp2" "$SERVER_DIR/product.json"
+                    rm -f "$SERVER_DIR/product.json.tmp1"
+                    echo "✓ product.json patched with sed"
+                }
+                
+                echo "Verification (first 5 matches):"
+                grep -E '(commit|version)' "$SERVER_DIR/product.json" | head -5
+                echo "Backup saved: product.json.backup"
+            else
+                echo "Warning: product.json not found at $SERVER_DIR/product.json"
+            fi
+            
+            # Update package.json if it exists
+            if [[ -f "$SERVER_DIR/package.json" ]]; then
+                echo "Updating package.json version..."
+                cp "$SERVER_DIR/package.json" "$SERVER_DIR/package.json.backup"
+                # AIX-compatible sed: create temp file, then replace
+                sed '0,/"version"[[:space:]]*:[[:space:]]*"[^"]*"/{s/"version"[[:space:]]*:[[:space:]]*"[^"]*"/"version": "'$DISTRO_VERSION'"/;}' "$SERVER_DIR/package.json" > "$SERVER_DIR/package.json.tmp"
+                mv "$SERVER_DIR/package.json.tmp" "$SERVER_DIR/package.json"
+                echo "✓ package.json updated"
+            fi
+            
+            # Skip JavaScript file patching - it's causing files to be emptied
+            # The product.json patching is sufficient for the server to work
+            echo "=== Skipping JavaScript File Patching ==="
+            echo "Note: JavaScript files are not patched to avoid corruption"
+            echo "The product.json patching is sufficient for server operation"
+            
+            # Create version marker files for reference
+            echo "$DISTRO_VERSION" > "$SERVER_DIR/version"
+            echo "$DISTRO_COMMIT" > "$SERVER_DIR/commit"
+            echo "✓ Created version marker files"
+            
+            # Create symlink for bobide-server
+            if [[ ! -f "$SERVER_SCRIPT" ]]; then
+                ln -sf "$SERVER_DIR/bin/codium-server" "$SERVER_SCRIPT"
+                echo "Created symlink: $SERVER_APP_NAME -> codium-server"
+            fi
+            
+            echo "=== Bob IDE Specific Configuration Complete ==="
+        else
+            echo "=== VSCodium/VS Code Configuration ==="
+            echo "Skipping Bob IDE specific patching operations"
+            
+            # For VSCodium, just ensure the server script exists or create standard symlink
+            if [[ ! -f "$SERVER_SCRIPT" ]]; then
+                # Check if codium-server exists and create symlink
+                if [[ -f "$SERVER_DIR/bin/codium-server" ]]; then
+                    ln -sf "$SERVER_DIR/bin/codium-server" "$SERVER_SCRIPT"
+                    echo "Created symlink: $SERVER_APP_NAME -> codium-server"
+                fi
+            fi
+            
+            echo "✓ VSCodium configuration complete (no patching required)"
+        fi
+        
+        echo "=== AIX Server Setup Complete ==="
+        
+        # Setup .bashrc for remote-cli
+        BASHRC="$HOME/.bashrc"
+        SNIPPET_MARKER="# === VSCodium remote-cli PATH setup ==="
+        
+        # Create .bashrc if it doesn't exist
+        if [ ! -f "$BASHRC" ]; then
+          touch "$BASHRC"
+        fi
+        
+        # Add snippet only if it's not already present
+        if ! grep -Fq "$SNIPPET_MARKER" "$BASHRC"; then
+          cat >> "$BASHRC" <<'EOF'
+
+# === VSCodium remote-cli PATH setup ===
+# Add all matching remote-cli directories to PATH
+if [ -d "$HOME/.vscodium-server/bin" ]; then
+  for dir in "$HOME"/.vscodium-server/bin/*/bin/remote-cli; do
+      if [ -d "$dir" ]; then
+          PATH="$PATH:$dir"
+      fi
+  done
+  export PATH
+fi
+# === End VSCodium remote-cli PATH setup ===
+
+EOF
+          echo "remote-cli PATH snippet added to $BASHRC"
+        else
+          echo "Snippet already present in $BASHRC, not adding again."
+        fi
     fi
 
     if [[ ! -f $SERVER_SCRIPT ]]; then
@@ -364,6 +782,75 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
 else
     echo "Server script already installed in $SERVER_SCRIPT"
 fi
+
+# Download and install Bob IDE extensions (only for Bob IDE on AIX)
+if [[ $PLATFORM == "aix" ]] && [[ "$IS_BOB_IDE" == true ]]; then
+    echo "=== Installing Bob IDE Extensions ==="
+    BOB_EXTENSIONS_URL="https://api.us-east.bob.ibm.com/update/reh/ibm-bob/linux/x64/1.105.1+bob1.0.0"
+    BOB_EXTENSIONS_DIR="$TMP_DIR/bob-extensions-$DISTRO_COMMIT"
+    
+    mkdir -p "$BOB_EXTENSIONS_DIR"
+    cd "$BOB_EXTENSIONS_DIR"
+    
+    echo "Downloading Bob IDE extensions from $BOB_EXTENSIONS_URL..."
+    if [[ ! -z $(which wget) ]]; then
+        wget --tries=3 --timeout=10 --no-verbose -O bob-extensions.tar.gz "$BOB_EXTENSIONS_URL"
+    elif [[ ! -z $(which curl) ]]; then
+        curl --retry 3 --connect-timeout 10 --location --show-error --silent --output bob-extensions.tar.gz "$BOB_EXTENSIONS_URL"
+    else
+        echo "Warning: No download tool available, skipping Bob extensions"
+    fi
+    
+    if [[ -f bob-extensions.tar.gz ]]; then
+        echo "Extracting Bob IDE extensions..."
+        # AIX tar doesn't support -z flag, use gunzip first
+        gunzip -c bob-extensions.tar.gz | tar -xf -
+        
+        # Create extensions directory if it doesn't exist
+        mkdir -p "$SERVER_DIR/extensions"
+        
+        # Copy bob-walkthroughs and bob-code extensions
+        if [[ -d "extensions/bob-walkthroughs" ]]; then
+            cp -r extensions/bob-walkthroughs "$SERVER_DIR/extensions/"
+            echo "✓ Copied bob-walkthroughs extension"
+        else
+            echo "Warning: bob-walkthroughs extension not found"
+        fi
+        
+        if [[ -d "extensions/bob-code" ]]; then
+            cp -r extensions/bob-code "$SERVER_DIR/extensions/"
+            echo "✓ Copied bob-code extension"
+        else
+            echo "Warning: bob-code extension not found"
+        fi
+        
+        # Cleanup
+        cd - > /dev/null
+        rm -rf "$BOB_EXTENSIONS_DIR"
+        echo "✓ Bob IDE extensions installed"
+    else
+        echo "Warning: Failed to download Bob IDE extensions"
+    fi
+    echo "=== Bob IDE Extensions Setup Complete ==="
+else
+    echo "=== Skipping Bob IDE Extensions (VSCodium/VS Code detected) ==="
+fi
+
+# Configure server settings for AIX compatibility
+echo "=== Configuring Server Settings for AIX ==="
+mkdir -p "$SERVER_DATA_DIR/data/Machine"
+cat > "$SERVER_DATA_DIR/data/Machine/settings.json" << 'SETTINGS_EOF'
+{
+  "terminal.integrated.shell.linux": "/opt/freeware/bin/bash",
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.profiles.linux": {
+    "bash": {
+      "path": "/opt/freeware/bin/bash"
+    }
+  }
+}
+SETTINGS_EOF
+echo "✓ Server settings configured (using bash instead of ksh)"
 
 # Try to find if server is already running
 if [[ -f $SERVER_PIDFILE ]]; then
@@ -405,7 +892,7 @@ if [[ -f $SERVER_LOGFILE ]]; then
         if [[ -n $LISTENING_ON ]]; then
             break
         fi
-        sleep 0.5
+        sleep 1
     done
 
     if [[ -z $LISTENING_ON ]]; then
@@ -619,4 +1106,48 @@ if($SERVER_ID) {
     }
 }
 `;
+}
+
+function extractBuildVersionFromTemplate(
+    template: string | undefined,
+    fallback: string
+): string {
+    if (!template) {
+        return fallback;
+    }
+
+    // Example template:
+    // https://github.com/VSCodium/vscodium/releases/download/1.105.17075/vscodium-reh-${os}-${arch}-1.105.17075.tar.gz
+    const m = template.match(/download\/([^/]+)\//);
+    return m?.[1] ?? fallback;
+}
+
+async function getMatchingAIXServerVersion(baseVersion: string): Promise<string | null> {
+    try {
+        // Fetch all releases
+        const response = await fetch('https://api.github.com/repos/tonykuttai/vscodium-aix-server/releases');
+        if (!response.ok) return null;
+
+        const releases = await response.json();
+        
+        // Extract major.minor from baseVersion (e.g., "1.105" from "1.105.1")
+        const versionParts = baseVersion.split('.');
+        const majorMinor = `${versionParts[0]}.${versionParts[1]}`;
+        
+        // Find releases that match the major.minor version
+        const matchingReleases = releases
+            .filter((release: any) => release.tag_name.startsWith(majorMinor))
+            .map((release: any) => release.tag_name)
+            .sort((a: string, b: string) => {
+                // Sort by build number (last part) descending
+                const aBuild = parseInt(a.split('.').pop() || '0');
+                const bBuild = parseInt(b.split('.').pop() || '0');
+                return bBuild - aBuild;
+            });
+        
+        // Return the latest matching version
+        return matchingReleases.length > 0 ? matchingReleases[0] : null;
+    } catch (error) {
+        return null;
+    }
 }
