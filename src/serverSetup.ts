@@ -607,8 +607,25 @@ SERVER_ROOT="$(dirname "$SCRIPT_DIR")"
 # Add node-pty native-libs to LIBPATH with absolute path
 export LIBPATH="\${SERVER_ROOT}/node_modules/node-pty/lib/native-libs:\${LIBPATH}"
 
-# Execute the server
-exec "$NODE_BIN" "$SERVER_ROOT/out/server-main.js" "$@"
+# Find the server main script (support both locations)
+SERVER_MAIN=""
+if [[ -f "$SERVER_ROOT/out/server-main.js" ]]; then
+    SERVER_MAIN="$SERVER_ROOT/out/server-main.js"
+elif [[ -f "$SERVER_ROOT/out/vs/server/main.js" ]]; then
+    SERVER_MAIN="$SERVER_ROOT/out/vs/server/main.js"
+else
+    echo "ERROR: Server main script not found" >&2
+    exit 1
+fi
+
+# Check if AIX platform override exists
+AIX_OVERRIDE=""
+if [[ -f "$SERVER_ROOT/aix-platform-override.js" ]]; then
+    AIX_OVERRIDE="-r $SERVER_ROOT/aix-platform-override.js"
+fi
+
+# Execute the server with AIX platform override if available
+exec "$NODE_BIN" $AIX_OVERRIDE "$SERVER_MAIN" "$@"
 WRAPPER_EOF
                 # Replace placeholder with actual Node.js path
                 sed "s|NODE_BINARY_PLACEHOLDER|$NODE_BINARY|g" "$TEMP_WRAPPER" > "$SERVER_DIR/bin/codium-server"
@@ -625,6 +642,30 @@ exec "$NODE_BINARY" "\$@"
 EOF
                 chmod +x "$SERVER_DIR/bin/node"
                 echo "✓ Patched $SERVER_DIR/bin/node wrapper"
+            fi
+            
+            # Comprehensive patching: Replace all hardcoded /opt/nodejs references
+            # Get Node.js directory
+            NODE_DIR="\$(dirname "\$NODE_BINARY")"
+            NODE_PRE_DIR="\$(dirname "\$NODE_DIR")"
+            
+            echo "=== Patching Server Files ==="
+            echo "Replacing: /opt/nodejs"
+            echo "With: \$NODE_PRE_DIR"
+            
+            # Count files to patch
+            FILE_COUNT=\$(find "\$SERVER_DIR" -type f \\( -name "*.sh" -o -name "*.js" -o -name "*.json" -o -name "*-server" \\) -exec grep -l "/opt/nodejs" {} \\; 2>/dev/null | wc -l)
+            echo "Found \$FILE_COUNT files to patch"
+            
+            if [[ \$FILE_COUNT -gt 0 ]]; then
+                find "\$SERVER_DIR" -type f \\( -name "*.sh" -o -name "*.js" -o -name "*.json" -o -name "*-server" \\) -exec grep -l "/opt/nodejs" {} \\; 2>/dev/null | while read -r file; do
+                    echo "  Patching: \\\${file#\$SERVER_DIR/}"
+                    sed -i.bak "s|/opt/nodejs|\$NODE_PRE_DIR|g" "\$file"
+                    rm -f "\$file.bak"
+                done
+                echo "✓ Patched \$FILE_COUNT files"
+            else
+                echo "No files need patching"
             fi
         fi
         

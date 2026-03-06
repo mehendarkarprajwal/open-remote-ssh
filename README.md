@@ -1,6 +1,6 @@
 # Open Remote - SSH
 
-![Open Remote SSH](https://raw.githubusercontent.com/jeanp413/open-remote-ssh/master/docs/images/open-remote-ssh.gif)
+![Open Remote SSH](https://raw.githubusercontent.com/mehendarkarprajwal/open-remote-ssh/master/docs/images/open-remote-ssh.gif)
 
 ## SSH Host Requirements
 You can connect to a running SSH server on the following platforms.
@@ -29,7 +29,7 @@ Enable the extension in your `argv.json`
     ...
     "enable-proposed-api": [
         ...,
-        "jeanp413.open-remote-ssh",
+        "mehendarkarprajwal.open-remote-ssh",
     ]
     ...
 }

@@ -1,7 +1,7 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import SSHConfig, { Directive, Line, Section } from '@jeanp413/ssh-config';
+import SSHConfig, { Directive, Line, Section } from '@mehendarkarprajwal/ssh-config';
 import * as vscode from 'vscode';
 import { exists as fileExists, normalizeToSlash, untildify } from '../common/files';
 import { isWindows } from '../common/platform';
@@ -119,7 +119,7 @@ export default class SSHConfiguration {
 
     getHostConfiguration(host: string): Record<string, string> {
         // Only a few directives return an array
-        // https://github.com/jeanp413/ssh-config/blob/8d187bb8f1d83a51ff2b1d127e6b6269d24092b5/src/ssh-config.ts#L9C1-L9C118
+        // https://github.com/mehendarkarprajwal/ssh-config/blob/8d187bb8f1d83a51ff2b1d127e6b6269d24092b5/src/ssh-config.ts#L9C1-L9C118
         return this.sshConfig.compute(host) as Record<string, string>;
     }
 }
