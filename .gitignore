@@ -9,3 +9,5 @@ vscode.proposed.*.d.ts
 *.ignore.ts
 serverSetup.patch
 package-lock.json
+serverSetup.ts.vscode
+docs/SHARED_SERVER_SETUP.md

@@ -408,12 +408,61 @@ else
     fi
 fi
 
-# Create installation folder
-if [[ ! -d $SERVER_DIR ]]; then
-    mkdir -p $SERVER_DIR
+# Check for shared server installation (root user's installation)
+# Dynamically determine root's home directory and handle edge case where root home is /
+ROOT_HOME=$(eval echo ~root)
+if [[ "$ROOT_HOME" == "/" ]]; then
+    SHARED_SERVER_DIR="/${serverDataFolderName}/bin/$DISTRO_COMMIT"
+else
+    SHARED_SERVER_DIR="$ROOT_HOME/${serverDataFolderName}/bin/$DISTRO_COMMIT"
+fi
+USE_SHARED_SERVER=false
+
+# Only check for shared server if we're not root
+if [[ "$(whoami)" != "root" ]] && [[ -d "$SHARED_SERVER_DIR" ]] && [[ -f "$SHARED_SERVER_DIR/bin/bobide-server" || -f "$SHARED_SERVER_DIR/bin/codium-server" ]]; then
+    echo "=== Found Shared Server Installation ==="
+    echo "Shared server location: $SHARED_SERVER_DIR"
+    USE_SHARED_SERVER=true
+    
+    # Create user's server directory structure for symlink
+    mkdir -p "$(dirname "$SERVER_DIR")"
     if (( $? > 0 )); then
-        echo "Error creating server install directory"
+        echo "Error creating server directory structure"
         print_install_results_and_exit 1
+    fi
+    
+    # Create symlink to shared server binaries
+    if [[ ! -L "$SERVER_DIR" ]] && [[ ! -d "$SERVER_DIR" ]]; then
+        ln -s "$SHARED_SERVER_DIR" "$SERVER_DIR"
+        if (( $? == 0 )); then
+            echo "✓ Created symlink: $SERVER_DIR -> $SHARED_SERVER_DIR"
+        else
+            echo "Warning: Failed to create symlink, will install locally"
+            USE_SHARED_SERVER=false
+        fi
+    elif [[ -L "$SERVER_DIR" ]]; then
+        echo "✓ Symlink already exists: $SERVER_DIR"
+    else
+        echo "Note: Local installation exists at $SERVER_DIR"
+        USE_SHARED_SERVER=false
+    fi
+else
+    if [[ "$(whoami)" == "root" ]]; then
+        echo "=== Installing as root user (will be shared with non-root users) ==="
+    else
+        echo "=== No shared server found, installing locally ==="
+    fi
+    USE_SHARED_SERVER=false
+fi
+
+# Create installation folder if not using shared server
+if [[ "$USE_SHARED_SERVER" != "true" ]]; then
+    if [[ ! -d $SERVER_DIR ]]; then
+        mkdir -p $SERVER_DIR
+        if (( $? > 0 )); then
+            echo "Error creating server install directory"
+            print_install_results_and_exit 1
+        fi
     fi
 fi
 
@@ -442,21 +491,25 @@ fi
 
 # Check if server script is already installed
 if [[ ! -f $SERVER_SCRIPT ]]; then
-    case "$PLATFORM" in
-        darwin | linux | alpine | aix )
-            ;;
-        *)
-            echo "Error '$PLATFORM' needs manual installation of remote extension host"
+    # Skip download if using shared server (symlink already points to it)
+    if [[ "$USE_SHARED_SERVER" == "true" ]]; then
+        echo "✓ Using shared server installation, skipping download"
+    else
+        case "$PLATFORM" in
+            darwin | linux | alpine | aix )
+                ;;
+            *)
+                echo "Error '$PLATFORM' needs manual installation of remote extension host"
+                print_install_results_and_exit 1
+                ;;
+        esac
+
+        pushd $SERVER_DIR > /dev/null || {
+            echo "Error: Failed to enter server directory $SERVER_DIR"
             print_install_results_and_exit 1
-            ;;
-    esac
+        }
 
-    pushd $SERVER_DIR > /dev/null || {
-        echo "Error: Failed to enter server directory $SERVER_DIR"
-        print_install_results_and_exit 1
-    }
-
-    # Standard download logic for all platforms including AIX
+        # Standard download logic for all platforms including AIX
     if [[ ! -z $(which wget) ]]; then
         wget --tries=3 --timeout=10 --continue --no-verbose -O vscode-server.tar.gz $SERVER_DOWNLOAD_URL
     elif [[ ! -z $(which curl) ]]; then
@@ -495,9 +548,21 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
         echo "=== Setting up Node.js for AIX ==="
         
         NODE_BINARY=""
+        # Dynamically determine root's home directory for shared Node.js
+        ROOT_HOME=$(eval echo ~root)
+        if [[ "$ROOT_HOME" == "/" ]]; then
+            SHARED_NODE_DIR="/.nodejs-v22.22.0"
+        else
+            SHARED_NODE_DIR="$ROOT_HOME/.nodejs-v22.22.0"
+        fi
         
-        # First, check if Node.js is already installed in home directory
-        if [[ -x "$HOME/.nodejs-v22.22.0/bin/node" ]]; then
+        # First, check for shared Node.js installation (root's installation)
+        if [[ "$(whoami)" != "root" ]] && [[ -x "$SHARED_NODE_DIR/bin/node" ]]; then
+            NODE_BINARY="$SHARED_NODE_DIR/bin/node"
+            echo "✓ Found shared Node.js installation: $NODE_BINARY"
+            $NODE_BINARY --version
+        # Second, check if Node.js is already installed in user's home directory
+        elif [[ -x "$HOME/.nodejs-v22.22.0/bin/node" ]]; then
             NODE_BINARY="$HOME/.nodejs-v22.22.0/bin/node"
             echo "Found Node.js in home directory: $NODE_BINARY"
             $NODE_BINARY --version
@@ -506,7 +571,7 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
             echo "Searching for existing Node.js installation..."
             
             # Check common paths
-            for node_path in /usr/bin/node /opt/freeware/bin/node /usr/local/bin/node; do
+            for node_path in /usr/bin/node /opt/freeware/bin/node /usr/local/bin/node $SHARED_NODE_DIR/bin/node; do
                 if [[ -x "$node_path" ]]; then
                     # Verify it's not a wrapper script by checking if it references /opt/nodejs
                     if ! grep -q "/opt/nodejs/bin/node" "$node_path" 2>/dev/null; then
@@ -526,7 +591,19 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
         if [[ -z "$NODE_BINARY" ]]; then
             echo "No existing Node.js found, downloading Node.js v22.22.0 for AIX..."
             
-            NODE_INSTALL_DIR="$HOME/.nodejs-v22.22.0"
+            # Use shared location for root, user's home for non-root (fallback)
+            if [[ "$(whoami)" == "root" ]]; then
+                ROOT_HOME=$(eval echo ~root)
+                if [[ "$ROOT_HOME" == "/" ]]; then
+                    NODE_INSTALL_DIR="/.nodejs-v22.22.0"
+                else
+                    NODE_INSTALL_DIR="$ROOT_HOME/.nodejs-v22.22.0"
+                fi
+                echo "Installing Node.js to shared location: $NODE_INSTALL_DIR"
+            else
+                NODE_INSTALL_DIR="$HOME/.nodejs-v22.22.0"
+                echo "Installing Node.js to user directory: $NODE_INSTALL_DIR"
+            fi
             NODE_BINARY="$NODE_INSTALL_DIR/bin/node"
             
             NODE_VERSION="v22.22.0"
@@ -564,6 +641,16 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
             fi
             
             cd "$SERVER_DIR"
+        fi
+        
+        # Print Node.js configuration summary
+        if [[ "$(whoami)" != "root" ]] && [[ "$NODE_BINARY" == "$SHARED_NODE_DIR/bin/node" ]]; then
+            echo "=========================================="
+            echo "  SHARED NODE.JS CONFIGURATION"
+            echo "=========================================="
+            echo "✓ Using shared Node.js from: $NODE_BINARY"
+            echo "✓ This reduces disk usage across all users"
+            echo "=========================================="
         fi
         
         # Try to create symlink at /opt/nodejs/bin/node (required by AIX server wrapper)
@@ -810,16 +897,17 @@ EOF
         else
           echo "Snippet already present in $BASHRC, not adding again."
         fi
+        fi
+
+        if [[ ! -f $SERVER_SCRIPT ]]; then
+            echo "Error server contents are corrupted"
+            print_install_results_and_exit 1
+        fi
+
+        rm -f vscode-server.tar.gz
+
+        popd > /dev/null
     fi
-
-    if [[ ! -f $SERVER_SCRIPT ]]; then
-        echo "Error server contents are corrupted"
-        print_install_results_and_exit 1
-    fi
-
-    rm -f vscode-server.tar.gz
-
-    popd > /dev/null
 else
     echo "Server script already installed in $SERVER_SCRIPT"
 fi
@@ -873,6 +961,9 @@ if [[ $PLATFORM == "aix" ]] && [[ "$IS_BOB_IDE" == true ]]; then
         echo "Warning: Failed to download Bob IDE extensions"
     fi
     echo "=== Bob IDE Extensions Setup Complete ==="
+elif [[ "$USE_SHARED_SERVER" == "true" ]]; then
+    echo "=== Using Shared Server Extensions ==="
+    echo "Extensions are already installed in the shared server location"
 else
     echo "=== Skipping Bob IDE Extensions (VSCodium/VS Code detected) ==="
 fi
@@ -943,6 +1034,19 @@ if [[ -f $SERVER_LOGFILE ]]; then
 else
     echo "Error server log file not found $SERVER_LOGFILE"
     print_install_results_and_exit 1
+fi
+
+# Print summary information
+if [[ "$USE_SHARED_SERVER" == "true" ]]; then
+    echo ""
+    echo "=========================================="
+    echo "  SHARED SERVER CONFIGURATION"
+    echo "=========================================="
+    echo "✓ Using shared server binaries from: $SHARED_SERVER_DIR"
+    echo "✓ User-specific data directory: $SERVER_DATA_DIR"
+    echo "✓ This reduces disk usage while maintaining user isolation"
+    echo "=========================================="
+    echo ""
 fi
 
 # Finish server setup
