@@ -11,3 +11,7 @@ serverSetup.patch
 package-lock.json
 serverSetup.ts.vscode
 docs/SHARED_SERVER_SETUP.md
+docs/BOB_IDE_INSTALLATION_SCENARIOS.md
+docs/PEER_TO_PEER_SHARING.md
+.gitignore
+PEE

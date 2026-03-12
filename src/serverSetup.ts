@@ -394,6 +394,30 @@ if [[ $PLATFORM == "aix" ]]; then
     export PATH="/opt/freeware/bin:$PATH"
 fi
 
+# ============================================
+# DETECT MACHINE TYPE (aixbase vs other AIX)
+# ============================================
+# ============================================
+# DETECT MACHINE TYPE (aixbase vs other AIX)
+# ============================================
+IS_AIX_BASE=false
+
+if [[ $PLATFORM == "aix" ]]; then
+    # Check if this is aixbase machine
+    HOSTNAME_CHECK="\$(hostname 2>/dev/null || echo '')"
+    if [[ "\$HOSTNAME_CHECK" == *"aixbase"* ]]; then
+        IS_AIX_BASE=true
+        echo "=== Detected aixbase machine ==="
+        echo "Shared installation will use: /tmp"
+    else
+        IS_AIX_BASE=false
+        echo "=== Detected non-aixbase AIX machine ==="
+        echo "Root will install to /.bobide-server"
+        echo "Non-root users will create symlinks to root's installation"
+    fi
+fi
+# ============================================
+
 # Handle OS release detection
 if [[ $PLATFORM == "aix" ]]; then
     OS_RELEASE_ID="aix"
@@ -408,55 +432,104 @@ else
     fi
 fi
 
-# Check for shared server installation (root user's installation)
-# Dynamically determine root's home directory and handle edge case where root home is /
-ROOT_HOME=$(eval echo ~root)
-if [[ "$ROOT_HOME" == "/" ]]; then
-    SHARED_SERVER_DIR="/${serverDataFolderName}/bin/$DISTRO_COMMIT"
-else
-    SHARED_SERVER_DIR="$ROOT_HOME/${serverDataFolderName}/bin/$DISTRO_COMMIT"
-fi
+# Check for shared server installation based on machine type
 USE_SHARED_SERVER=false
+INSTALL_TO_SHARED=false
 
-# Only check for shared server if we're not root
-if [[ "$(whoami)" != "root" ]] && [[ -d "$SHARED_SERVER_DIR" ]] && [[ -f "$SHARED_SERVER_DIR/bin/bobide-server" || -f "$SHARED_SERVER_DIR/bin/codium-server" ]]; then
-    echo "=== Found Shared Server Installation ==="
-    echo "Shared server location: $SHARED_SERVER_DIR"
-    USE_SHARED_SERVER=true
+if [[ "$IS_AIX_BASE" == true ]]; then
+    # aixbase machine: Use /tmp for shared installation
+    SHARED_SERVER_DIR="/tmp/${serverDataFolderName}/bin/$DISTRO_COMMIT"
     
-    # Create user's server directory structure for symlink
-    mkdir -p "$(dirname "$SERVER_DIR")"
-    if (( $? > 0 )); then
-        echo "Error creating server directory structure"
-        print_install_results_and_exit 1
+    # Check if shared server exists and is accessible
+    if [[ -d "$SHARED_SERVER_DIR" ]] && [[ -r "$SHARED_SERVER_DIR" ]] && [[ -x "$SHARED_SERVER_DIR" ]]; then
+        if [[ -f "$SHARED_SERVER_DIR/bin/bobide-server" ]] || [[ -f "$SHARED_SERVER_DIR/bin/codium-server" ]]; then
+            echo "=== Found Shared Server Installation ==="
+            echo "Shared server location: $SHARED_SERVER_DIR"
+            USE_SHARED_SERVER=true
+            
+            # Create symlink to shared server
+            if [[ ! -e "$SERVER_DIR" ]]; then
+                mkdir -p "$(dirname "$SERVER_DIR")" && ln -s "$SHARED_SERVER_DIR" "$SERVER_DIR"
+                if (( $? == 0 )); then
+                    echo "✓ Created symlink: $SERVER_DIR -> $SHARED_SERVER_DIR"
+                else
+                    echo "Warning: Failed to create symlink, will install locally"
+                    USE_SHARED_SERVER=false
+                fi
+            elif [[ -L "$SERVER_DIR" ]]; then
+                echo "✓ Symlink already exists"
+            else
+                echo "Note: Local installation exists"
+                USE_SHARED_SERVER=false
+            fi
+        fi
+    else
+        # No shared installation exists - try to install to /tmp
+        echo "=== No Shared Installation Found ==="
+        echo "Attempting to install to shared location: $SHARED_SERVER_DIR"
+        
+        # Try to create shared directory in /tmp
+        if mkdir -p "$SHARED_SERVER_DIR" 2>/dev/null; then
+            echo "✓ Created shared directory: $SHARED_SERVER_DIR"
+            INSTALL_TO_SHARED=true
+            SERVER_DIR="$SHARED_SERVER_DIR"
+            echo "Installing to /tmp for all users to use"
+        else
+            echo "⚠ Cannot create shared directory (permission denied)"
+            echo "Installing to user's home directory instead"
+            INSTALL_TO_SHARED=false
+        fi
+    fi
+else
+    # Non-aixbase machine: Check for root's installation
+    # Dynamically determine root's home directory and handle edge case where root home is /
+    ROOT_HOME=\$(eval echo ~root)
+    if [[ "\$ROOT_HOME" == "/" ]]; then
+        SHARED_SERVER_DIR="/${serverDataFolderName}/bin/$DISTRO_COMMIT"
+    else
+        SHARED_SERVER_DIR="\$ROOT_HOME/${serverDataFolderName}/bin/$DISTRO_COMMIT"
     fi
     
-    # Create symlink to shared server binaries
-    if [[ ! -L "$SERVER_DIR" ]] && [[ ! -d "$SERVER_DIR" ]]; then
-        ln -s "$SHARED_SERVER_DIR" "$SERVER_DIR"
-        if (( $? == 0 )); then
-            echo "✓ Created symlink: $SERVER_DIR -> $SHARED_SERVER_DIR"
+    # Only check for shared server if we're not root
+    if [[ "\$(whoami)" != "root" ]] && [[ -d "\$SHARED_SERVER_DIR" ]] && [[ -f "\$SHARED_SERVER_DIR/bin/bobide-server" || -f "\$SHARED_SERVER_DIR/bin/codium-server" ]]; then
+        echo "=== Found Shared Server Installation ==="
+        echo "Shared server location: \$SHARED_SERVER_DIR"
+        USE_SHARED_SERVER=true
+        
+        # Create user's server directory structure for symlink
+        mkdir -p "\$(dirname "\$SERVER_DIR")"
+        if (( \$? > 0 )); then
+            echo "Error creating server directory structure"
+            print_install_results_and_exit 1
+        fi
+        
+        # Create symlink to shared server binaries
+        if [[ ! -L "\$SERVER_DIR" ]] && [[ ! -d "\$SERVER_DIR" ]]; then
+            ln -s "\$SHARED_SERVER_DIR" "\$SERVER_DIR"
+            if (( \$? == 0 )); then
+                echo "✓ Created symlink: \$SERVER_DIR -> \$SHARED_SERVER_DIR"
+            else
+                echo "Warning: Failed to create symlink, will install locally"
+                USE_SHARED_SERVER=false
+            fi
+        elif [[ -L "\$SERVER_DIR" ]]; then
+            echo "✓ Symlink already exists: \$SERVER_DIR"
         else
-            echo "Warning: Failed to create symlink, will install locally"
+            echo "Note: Local installation exists at \$SERVER_DIR"
             USE_SHARED_SERVER=false
         fi
-    elif [[ -L "$SERVER_DIR" ]]; then
-        echo "✓ Symlink already exists: $SERVER_DIR"
     else
-        echo "Note: Local installation exists at $SERVER_DIR"
+        if [[ "\$(whoami)" == "root" ]]; then
+            echo "=== Installing as root user (will be shared with non-root users) ==="
+        else
+            echo "=== No shared server found, installing locally ==="
+        fi
         USE_SHARED_SERVER=false
     fi
-else
-    if [[ "$(whoami)" == "root" ]]; then
-        echo "=== Installing as root user (will be shared with non-root users) ==="
-    else
-        echo "=== No shared server found, installing locally ==="
-    fi
-    USE_SHARED_SERVER=false
 fi
 
-# Create installation folder if not using shared server
-if [[ "$USE_SHARED_SERVER" != "true" ]]; then
+# Create installation folder if not using existing shared server
+if [[ "$USE_SHARED_SERVER" != "true" ]] && [[ "$INSTALL_TO_SHARED" != "true" ]]; then
     if [[ ! -d $SERVER_DIR ]]; then
         mkdir -p $SERVER_DIR
         if (( $? > 0 )); then
@@ -536,6 +609,16 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
         print_install_results_and_exit 1
     fi
 
+    # Create bobide-server symlink to codium-server
+    if [[ -f "$SERVER_DIR/bin/codium-server" ]] && [[ ! -e "$SERVER_DIR/bin/bobide-server" ]]; then
+        ln -s codium-server "$SERVER_DIR/bin/bobide-server"
+        if (( $? == 0 )); then
+            echo "✓ Created symlink: bobide-server -> codium-server"
+        else
+            echo "Warning: Failed to create bobide-server symlink"
+        fi
+    fi
+    
     # Special handling for AIX server wrapper
     if [[ $PLATFORM == "aix" ]]; then
         # Ensure the AIX server wrapper is executable
@@ -548,69 +631,68 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
         echo "=== Setting up Node.js for AIX ==="
         
         NODE_BINARY=""
-        # Dynamically determine root's home directory for shared Node.js
-        ROOT_HOME=$(eval echo ~root)
-        if [[ "$ROOT_HOME" == "/" ]]; then
-            SHARED_NODE_DIR="/.nodejs-v22.22.0"
+        
+        # Determine shared Node.js location based on machine type
+        if [[ "$IS_AIX_BASE" == true ]]; then
+            SHARED_NODE="/tmp/.nodejs-v22.22.0/bin/node"
         else
-            SHARED_NODE_DIR="$ROOT_HOME/.nodejs-v22.22.0"
+            # For non-aixbase, check root's installation
+            ROOT_HOME=\$(eval echo ~root)
+            if [[ "\$ROOT_HOME" == "/" ]]; then
+                SHARED_NODE="/.nodejs-v22.22.0/bin/node"
+            else
+                SHARED_NODE="\$ROOT_HOME/.nodejs-v22.22.0/bin/node"
+            fi
         fi
         
-        # First, check for shared Node.js installation (root's installation)
-        if [[ "$(whoami)" != "root" ]] && [[ -x "$SHARED_NODE_DIR/bin/node" ]]; then
-            NODE_BINARY="$SHARED_NODE_DIR/bin/node"
-            echo "✓ Found shared Node.js installation: $NODE_BINARY"
+        # Check shared Node.js first (skip if it's the same as user's home)
+        if [[ "$SHARED_NODE" != "$HOME/.nodejs-v22.22.0/bin/node" ]] && [[ -x "$SHARED_NODE" ]]; then
+            NODE_BINARY="$SHARED_NODE"
+            echo "✓ Found shared Node.js: $NODE_BINARY"
             $NODE_BINARY --version
-        # Second, check if Node.js is already installed in user's home directory
+        # Check user's own Node.js
         elif [[ -x "$HOME/.nodejs-v22.22.0/bin/node" ]]; then
             NODE_BINARY="$HOME/.nodejs-v22.22.0/bin/node"
-            echo "Found Node.js in home directory: $NODE_BINARY"
+            echo "Found Node.js in home directory"
             $NODE_BINARY --version
-        else
-            # Try to find existing Node.js in system (skip wrapper scripts)
-            echo "Searching for existing Node.js installation..."
-            
-            # Check common paths
-            for node_path in /usr/bin/node /opt/freeware/bin/node /usr/local/bin/node $SHARED_NODE_DIR/bin/node; do
-                if [[ -x "$node_path" ]]; then
-                    # Verify it's not a wrapper script by checking if it references /opt/nodejs
-                    if ! grep -q "/opt/nodejs/bin/node" "$node_path" 2>/dev/null; then
-                        # Try to run it to verify it works
-                        if "$node_path" --version >/dev/null 2>&1; then
-                            NODE_BINARY="$node_path"
-                            echo "Found working Node.js at: $NODE_BINARY"
-                            $NODE_BINARY --version
-                            break
-                        fi
-                    fi
-                fi
-            done
+        # Check system paths
+        elif [[ -x "/opt/freeware/bin/node" ]]; then
+            NODE_BINARY="/opt/freeware/bin/node"
+            echo "Found system Node.js"
+            $NODE_BINARY --version
         fi
         
         # If no existing Node.js found, download and install
         if [[ -z "$NODE_BINARY" ]]; then
             echo "No existing Node.js found, downloading Node.js v22.22.0 for AIX..."
             
-            # Use shared location for root, user's home for non-root (fallback)
-            if [[ "$(whoami)" == "root" ]]; then
-                ROOT_HOME=$(eval echo ~root)
-                if [[ "$ROOT_HOME" == "/" ]]; then
-                    NODE_INSTALL_DIR="/.nodejs-v22.22.0"
+            # Determine installation directory based on machine type
+            if [[ "$IS_AIX_BASE" == true ]]; then
+                # Try to install to /tmp for aixbase machines
+                SHARED_NODE_DIR="/tmp/.nodejs-v22.22.0"
+                if mkdir -p "$SHARED_NODE_DIR" 2>/dev/null; then
+                    NODE_INSTALL_DIR="$SHARED_NODE_DIR"
+                    echo "✓ Installing Node.js to shared location: $NODE_INSTALL_DIR"
+                    echo "  All users will be able to use this installation"
                 else
-                    NODE_INSTALL_DIR="$ROOT_HOME/.nodejs-v22.22.0"
+                    NODE_INSTALL_DIR="$HOME/.nodejs-v22.22.0"
+                    echo "⚠ Cannot create shared directory (permission denied)"
+                    echo "  Installing Node.js to user's home directory: $NODE_INSTALL_DIR"
                 fi
-                echo "Installing Node.js to shared location: $NODE_INSTALL_DIR"
             else
+                # For non-aixbase, install to user's home (root or non-root)
                 NODE_INSTALL_DIR="$HOME/.nodejs-v22.22.0"
-                echo "Installing Node.js to user directory: $NODE_INSTALL_DIR"
+                echo "Installing Node.js to: $NODE_INSTALL_DIR"
             fi
+            
             NODE_BINARY="$NODE_INSTALL_DIR/bin/node"
             
             NODE_VERSION="v22.22.0"
             NODE_TARBALL="node-$NODE_VERSION-aix-ppc64.tar.gz"
             NODE_URL="https://nodejs.org/dist/$NODE_VERSION/$NODE_TARBALL"
             
-            cd "$HOME"
+            # Change to parent directory of NODE_INSTALL_DIR for download
+            cd "$(dirname "$NODE_INSTALL_DIR")"
             
             if [[ ! -z $(which wget) ]]; then
                 wget --tries=3 --timeout=30 --no-verbose -O "$NODE_TARBALL" "$NODE_URL"
@@ -643,8 +725,8 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
             cd "$SERVER_DIR"
         fi
         
-        # Print Node.js configuration summary
-        if [[ "$(whoami)" != "root" ]] && [[ "$NODE_BINARY" == "$SHARED_NODE_DIR/bin/node" ]]; then
+        # Print Node.js configuration summary if using shared installation
+        if [[ "$NODE_BINARY" != "$HOME/.nodejs-v22.22.0/bin/node" ]] && [[ -n "$NODE_BINARY" ]]; then
             echo "=========================================="
             echo "  SHARED NODE.JS CONFIGURATION"
             echo "=========================================="
@@ -760,20 +842,10 @@ EOF
         export PATH="$NODE_INSTALL_DIR/bin:$PATH"
         echo "✓ Node.js setup complete"
         
-        # Detect if this is Bob IDE by checking version string or server application name
-        IS_BOB_IDE=false
-        if [[ "$DISTRO_VERSION" == *"+bob"* ]] || [[ "$SERVER_APP_NAME" == *"bob"* ]]; then
-            IS_BOB_IDE=true
-            echo "=== Detected Bob IDE ==="
-        else
-            echo "=== Detected VSCodium/VS Code ==="
-        fi
+        # Bob IDE specific operations (always applied on AIX)
+        echo "=== Applying Bob IDE Specific Configuration ==="
         
-        # Bob IDE specific operations
-        if [[ "$IS_BOB_IDE" == true ]]; then
-            echo "=== Applying Bob IDE Specific Configuration ==="
-            
-            # Patch product.json to match Bob IDE commit/version for client handshake
+        # Patch product.json to match Bob IDE commit/version for client handshake
             if [[ -f "$SERVER_DIR/product.json" ]]; then
                 echo "=== AIX VSCodium Server Version Update ==="
                 echo "Patching product.json with Bob IDE values..."
@@ -842,28 +914,21 @@ except Exception as e:
             echo "$DISTRO_COMMIT" > "$SERVER_DIR/commit"
             echo "✓ Created version marker files"
             
-            # Create symlink for bobide-server
+            # Create symlink for bobide-server if not exists
             if [[ ! -f "$SERVER_SCRIPT" ]]; then
                 ln -sf "$SERVER_DIR/bin/codium-server" "$SERVER_SCRIPT"
                 echo "Created symlink: $SERVER_APP_NAME -> codium-server"
             fi
             
-            echo "=== Bob IDE Specific Configuration Complete ==="
-        else
-            echo "=== VSCodium/VS Code Configuration ==="
-            echo "Skipping Bob IDE specific patching operations"
-            
-            # For VSCodium, just ensure the server script exists or create standard symlink
-            if [[ ! -f "$SERVER_SCRIPT" ]]; then
-                # Check if codium-server exists and create symlink
-                if [[ -f "$SERVER_DIR/bin/codium-server" ]]; then
-                    ln -sf "$SERVER_DIR/bin/codium-server" "$SERVER_SCRIPT"
-                    echo "Created symlink: $SERVER_APP_NAME -> codium-server"
-                fi
+            # Set proper permissions for entire SERVER_DIR if root is installing
+            if [[ "\$(whoami)" == "root" ]]; then
+                echo "Setting permissions for entire server directory..."
+                chmod -R 755 "$SERVER_DIR" 2>/dev/null
+                echo "✓ Permissions set (755) for $SERVER_DIR"
+                echo "  Non-root users can now access all server files"
             fi
             
-            echo "✓ VSCodium configuration complete (no patching required)"
-        fi
+            echo "=== Bob IDE Specific Configuration Complete ==="
         
         echo "=== AIX Server Setup Complete ==="
         
@@ -912,60 +977,72 @@ else
     echo "Server script already installed in $SERVER_SCRIPT"
 fi
 
-# Download and install Bob IDE extensions (only for Bob IDE on AIX)
-if [[ $PLATFORM == "aix" ]] && [[ "$IS_BOB_IDE" == true ]]; then
-    echo "=== Installing Bob IDE Extensions ==="
-    BOB_EXTENSIONS_URL="https://api.us-east.bob.ibm.com/update/reh/ibm-bob/linux/x64/1.105.1+bob1.0.0"
-    BOB_EXTENSIONS_DIR="$TMP_DIR/bob-extensions-$DISTRO_COMMIT"
-    
-    mkdir -p "$BOB_EXTENSIONS_DIR"
-    cd "$BOB_EXTENSIONS_DIR"
-    
-    echo "Downloading Bob IDE extensions from $BOB_EXTENSIONS_URL..."
-    if [[ ! -z $(which wget) ]]; then
-        wget --tries=3 --timeout=10 --no-verbose -O bob-extensions.tar.gz "$BOB_EXTENSIONS_URL"
-    elif [[ ! -z $(which curl) ]]; then
-        curl --retry 3 --connect-timeout 10 --location --show-error --silent --output bob-extensions.tar.gz "$BOB_EXTENSIONS_URL"
+# Bob IDE is always assumed for AIX platform
+# Download and install Bob IDE extensions (always for AIX)
+if [[ $PLATFORM == "aix" ]]; then
+    echo "=== Bob IDE Setup (AIX Platform) ==="
+    # Check if BOB extensions already exist in the server directory
+    if [[ -d "$SERVER_DIR/extensions/bob-walkthroughs" ]] && [[ -d "$SERVER_DIR/extensions/bob-code" ]]; then
+        echo "=== Bob IDE Extensions Already Installed ==="
+        echo "✓ bob-walkthroughs extension found"
+        echo "✓ bob-code extension found"
+        echo "Skipping download"
     else
-        echo "Warning: No download tool available, skipping Bob extensions"
-    fi
-    
-    if [[ -f bob-extensions.tar.gz ]]; then
-        echo "Extracting Bob IDE extensions..."
-        # AIX tar doesn't support -z flag, use gunzip first
-        gunzip -c bob-extensions.tar.gz | tar -xf -
+        echo "=== Installing Bob IDE Extensions ==="
+        BOB_EXTENSIONS_URL="https://api.us-east.bob.ibm.com/update/reh/ibm-bob/linux/x64/1.105.1+bob1.0.0"
+        BOB_EXTENSIONS_DIR="$TMP_DIR/bob-extensions-$DISTRO_COMMIT"
         
-        # Create extensions directory if it doesn't exist
-        mkdir -p "$SERVER_DIR/extensions"
+        mkdir -p "$BOB_EXTENSIONS_DIR"
+        cd "$BOB_EXTENSIONS_DIR"
         
-        # Copy bob-walkthroughs and bob-code extensions
-        if [[ -d "extensions/bob-walkthroughs" ]]; then
-            cp -r extensions/bob-walkthroughs "$SERVER_DIR/extensions/"
-            echo "✓ Copied bob-walkthroughs extension"
+        echo "Downloading Bob IDE extensions from $BOB_EXTENSIONS_URL..."
+        if [[ ! -z $(which wget) ]]; then
+            wget --tries=3 --timeout=10 --no-verbose -O bob-extensions.tar.gz "$BOB_EXTENSIONS_URL"
+        elif [[ ! -z $(which curl) ]]; then
+            curl --retry 3 --connect-timeout 10 --location --show-error --silent --output bob-extensions.tar.gz "$BOB_EXTENSIONS_URL"
         else
-            echo "Warning: bob-walkthroughs extension not found"
+            echo "Warning: No download tool available, skipping Bob extensions"
         fi
         
-        if [[ -d "extensions/bob-code" ]]; then
-            cp -r extensions/bob-code "$SERVER_DIR/extensions/"
-            echo "✓ Copied bob-code extension"
+        if [[ -f bob-extensions.tar.gz ]]; then
+            echo "Extracting Bob IDE extensions..."
+            # AIX tar doesn't support -z flag, use gunzip first
+            gunzip -c bob-extensions.tar.gz | tar -xf -
+            
+            # Create extensions directory if it doesn't exist
+            mkdir -p "$SERVER_DIR/extensions"
+            
+            # Copy bob-walkthroughs and bob-code extensions
+            if [[ -d "extensions/bob-walkthroughs" ]]; then
+                cp -r extensions/bob-walkthroughs "$SERVER_DIR/extensions/"
+                echo "✓ Copied bob-walkthroughs extension"
+            else
+                echo "Warning: bob-walkthroughs extension not found"
+            fi
+            
+            if [[ -d "extensions/bob-code" ]]; then
+                cp -r extensions/bob-code "$SERVER_DIR/extensions/"
+                echo "✓ Copied bob-code extension"
+            else
+                echo "Warning: bob-code extension not found"
+            fi
+            
+            # Set proper permissions for entire extensions directory so non-root users can access them
+            if [[ "\$(whoami)" == "root" ]]; then
+                echo "Setting permissions for extensions directory..."
+                chmod -R 755 "$SERVER_DIR/extensions" 2>/dev/null
+                echo "✓ Permissions set (755) for entire extensions directory"
+            fi
+            
+            # Cleanup
+            cd - > /dev/null
+            rm -rf "$BOB_EXTENSIONS_DIR"
+            echo "✓ Bob IDE extensions installed"
         else
-            echo "Warning: bob-code extension not found"
+            echo "Warning: Failed to download Bob IDE extensions"
         fi
-        
-        # Cleanup
-        cd - > /dev/null
-        rm -rf "$BOB_EXTENSIONS_DIR"
-        echo "✓ Bob IDE extensions installed"
-    else
-        echo "Warning: Failed to download Bob IDE extensions"
     fi
     echo "=== Bob IDE Extensions Setup Complete ==="
-elif [[ "$USE_SHARED_SERVER" == "true" ]]; then
-    echo "=== Using Shared Server Extensions ==="
-    echo "Extensions are already installed in the shared server location"
-else
-    echo "=== Skipping Bob IDE Extensions (VSCodium/VS Code detected) ==="
 fi
 
 # Configure server settings for AIX compatibility
